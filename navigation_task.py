@@ -24,7 +24,7 @@ class NavigationManager(object):
 
         # a data structure which able me to discard oldest elemnt
         # when I want to add a new one into the array
-        self.old_odometry_msg_array = deque(maxlen=30)
+        self.old_odometry_msg_array = deque(maxlen=60)
 
         self.goal = None
 
@@ -53,10 +53,11 @@ class NavigationManager(object):
         # I keep a record of some odometry_msg
         previous_odom_msg = self.odometry_msg
         
-        # I record message with a distance of 2 second, with a maxium record 2*30
+        # I record message with a distance of 2 second, with a maxium record 2*60
+        # if max_stuck_time is 60, in the last minute I have same poses, so I record last 2 minutes
         time_distance = int( round(( self.old_odometry_msg_array[-1].header.stamp.nsec - data.header.stamp.nsec )) )
         
-        if len(self.old_odometry_msg_array) > 0 and  time_distance >= 2:
+        if len(self.old_odometry_msg_array) > 0 and  time_distance >= 2 and self.is_stuck==False:
             self.old_odometry_msg_array.append( previous_odom_msg )
 
         # self.distance it was the distance calculate of the previous msf
@@ -87,7 +88,10 @@ class NavigationManager(object):
                 if abs(rospy.get_time()-self.stuck_time)>self.max_stuck_time:
                     print("ROBOT IS STUCK!!")  
                     
+                    self.is_stuck = True
                     self.recovery_behavior()
+                    self.is_struck = False
+
 
 
     def set_recovery_goal(self, recovery_goal):

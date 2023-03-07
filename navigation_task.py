@@ -9,7 +9,7 @@ from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
 from geometry_msgs.msg import Pose, Point, Quaternion
 from nav_msgs.msg import OccupancyGrid,Odometry
 import numpy as np
-from itertools import product
+from itertools import product   # for cartesian product
 
 from collections import deque
 
@@ -22,6 +22,7 @@ import random
 # I keep there data structure outside the class in a way that, If the program
 # is spinning, all times I create a new object NavigationManager with an empty structure
 old_odom_msg = deque(maxlen=60)
+first_state = None
 
 class NavigationManager(object):
     def __init__(self, topic):
@@ -49,15 +50,19 @@ class NavigationManager(object):
 
     def my_callback_nav(self, data):
 
+        if first_state is None:
+            first_state = self.odom_msg
+
         # I keep a record of some odometry_msg
         previous_odom_msg = self.odom_msg
         
         # I record message with a distance of 2 second, with a maxium record 2*60
         # if max_stuck_time is 60, in the last minute I have same poses, so I record last 2 minutes
+        # should store states / messages every 2 seconds
         if len(old_odom_msg) > 0:
             time_distance = int( round(( old_odom_msg[-1].header.stamp.nsec - data.header.stamp.nsec )) )
         
-        if len(old_odom_msg) > 0 and  time_distance >= 2 and self.is_stuck==False:
+        if len(old_odom_msg) > 0 and  time_distance >= 2.0 and self.is_stuck==False:
             self.old_odom_msg.append( previous_odom_msg )
 
         # self.distance it was the distance calculate of the previous msf
@@ -91,8 +96,6 @@ class NavigationManager(object):
                     self.is_stuck = True
                     self.recovery_behavior()
                     self.is_struck = False
-
-
 
     def set_recovery_goal(self, recovery_goal):
         self.recovery_goal = recovery_goal
@@ -214,29 +217,48 @@ class OccupancyGridManager(object):
 
         self.grid_map = data.data
         #self.frame_grid = np.zeros((self.height, self.width,1), dtype="uint8")
-        self.frame_grid = np.CreateMat(self.height, self.width, np.CV_8UC1)
+        #self.frame_grid = np.CreateMat(self.height, self.width, np.CV_8UC1)
+        
+        # must undestand if I need a frame_grid. I don't think
 
         if self.goal:
             self.goal=self.update_goal()
 
     #world coordinates from costmap cells
-    def get_world_x_y(self, costmap_x, costmap_y):
+    def cost2world(self, costmap_x, costmap_y):
         world_x = costmap_x * self.resolution + self.origin.position.x
         world_y = costmap_y * self.resolution + self.origin.position.y
         return world_x, world_y
 
     #costmap cells from world coordinates
-    def get_costmap_x_y(self, world_x, world_y):
-        costmap_x = int(
-            round((world_x - self.origin.position.x) / self.resolution))
-        costmap_y = int(
-            round((world_y - self.origin.position.y) / self.resolution))
+    def world2cost(self, world_x, world_y):
+        costmap_x = int(round((world_x - self.origin.position.x) / self.resolution))
+        costmap_y = int(round((world_y - self.origin.position.y) / self.resolution))
+
+        #costmap_x = int( round(world_x/self.resolution) )
+        #costmap_y = int( round(world_y/self.resolution) )
         return costmap_x, costmap_y
 
-    def get_cost_from_world_x_y(self, x, y):
-        cx, cy = self.get_costmap_x_y(x, y)
+    # x, y are in grid_map coordinate
+    def get_cost_point(self,grid_x,grid_y):
+        if self.is_in_gridmap(grid_x,grid_y):
+            return self.grid_map[grid_x][grid_y]
+        else:
+            return None
+    
+    # x, y are in grid coordinate
+    def get_world_point(self,grid_x,grid_y):
+        world_x, world_y = self.cost2world(grid_x, grid_y)
+        if self.is_in_map(world_x, world_y):
+            return world_x, world_y
+        else:
+            return None
+
+    # given a point in the world map, return his value in the costmap ( cell value )
+    def get_cell_value_from_world_x_y(self, x, y):
+        cx, cy = self.world2cost(x, y)
         try:
-            return self.get_cost_from_costmap_x_y(cx, cy)
+            return self.get_cell_value_from_costmap_x_y(cx, cy)
         except IndexError as e:
             raise IndexError("Coordinates out of grid (in frame: {}) x: {}, y: {} must be in between: [{}, {}], [{}, {}]. Internal error: {}".format(
                 self.reference_frame, x, y,
@@ -246,15 +268,17 @@ class OccupancyGridManager(object):
                 self.origin.position.y + self.width * self.resolution,
                 e))
 
-    def get_cost_from_costmap_x_y(self, x, y):
+    # given a point in the costmap / gridmap, return his value in the costmap ( cell value )
+    def get_cell_value_from_costmap_x_y(self, x, y):
         if self.is_in_gridmap(x, y):
             # data comes in row-major order http://docs.ros.org/en/melodic/api/nav_msgs/html/msg/OccupancyGrid.html
             # first index is the row, second index the column
-            return self.grid_map[y][x]
+            return self.grid_map[y][x]      # should not be [x][y] ? x = rows, y = cols?
         else:
             raise IndexError(
                 "Coordinates out of gridmap, x: {}, y: {} must be in between: [0, {}], [0, {}]".format(
                     x, y, self.height, self.width))
+    
 
     def is_in_gridmap(self, grid_x, grid_y):
         if -1 < grid_x < self.width and -1 < grid_y < self.height:
@@ -265,6 +289,67 @@ class OccupancyGridManager(object):
     def is_in_map(self,world_x,world_y):
         i,j=self.get_costmap_x_y(world_x,world_y)
         return self.is_in_gridmap(i,j)
+
+
+    # when a goal for Occupacy grid is setted, this function will search for
+    # another point if the goal-point is an obstacle
+    def update_goal(self,min_radius=3,max_radius=5000):
+
+        goal=self.goal
+        goal_x=goal.target_pose.pose.position.x
+        goal_y=goal.target_pose.pose.position.y
+
+        # check if the goal is an obstacle
+        goal_value = self.get_cell_value_from_world_x_y(goal_x,goal_y)
+        if goal_value > 0:
+            print("the goal {:.2f},{:.2f} is an obstacle, search for near alternative...".format(goal_x,goal_y))
+
+            # I extract coordinate in the costmap from the goal-coordinate expressed in world coordinate
+            cell_x,cell_y=self.world2cost(goal_x,goal_y)
+
+            # search for a new cell in a radial way from the goal-coordiante cell 
+            new_x,new_y,_=self.get_closest_cell_under_cost( cell_x, cell_y, 1,min_radius, max_radius)
+
+            if new_x<0 and new_y<0:
+                print("!!! feasible goal not found !!!")
+
+                # I set as goal the first position of the rover, maybe wrong because
+                # may be repeat same steps that bring to robot to stuck-state
+                goal.target_pose.pose.position.x = first_state.pose.pose.position.x
+                goal.target_pose.pose.position.y = first_state.pose.pose.position.y
+                return None
+            
+            # I convert goal-coordinate-cell in world coordinate and set it as goal
+            new_goal_x,new_goal_y= self.cost2world(new_x,new_y)
+            goal.target_pose.pose.position.x=new_goal_x
+            goal.target_pose.pose.position.y=new_goal_y
+
+            dist= math.sqrt( (goal_x-new_goal_x)**2 +  (goal_y-new_goal_y)**2)
+            print("new goal found: {:.2f},{:.2f}\n\t at distance {:.2f} from previous goal".format(new_goal_x,new_goal_y,dist))
+
+            self.goal=goal
+            return goal
+        
+        # goal is not obstacle
+        self.goal=goal
+        return goal
+
+    # not used
+    def check_goal(self):
+        goal=self.goal
+        goal_x=goal.target_pose.pose.position.x
+        goal_y=goal.target_pose.pose.position.y
+
+        goal_value = self.get_cost_point(goal_x,goal_y)
+
+        if goal_value == None:
+            print("Not a right point: probably outside of the map")
+        elif goal_value >0: 
+            print("The goal {:.2f},{:.2f} is an obstacle".format(goal_x,goal_y))
+            return False
+        else:
+            print("The goal {:.2f},{:.2f} is OK!".format(goal_x,goal_y))
+            return True
 
     def get_closest_cell_under_cost(self, x, y, cost_threshold,min_radius, max_radius):
         """
@@ -277,45 +362,9 @@ class OccupancyGridManager(object):
         :param cost_threshold int: maximum threshold to look for
         :param max_radius int: maximum number of cells around to check
         """
-        return self._get_closest_cell_arbitrary_cost(
+        return self.get_closest_cell_arbitrary_cost(
             x, y, cost_threshold,min_radius, max_radius, bigger_than=False)
-
-    def update_goal(self,min_radius=3,max_radius=5000):
-        goal=self.goal
-        goal_x=goal.target_pose.pose.position.x
-        goal_y=goal.target_pose.pose.position.y
-        if self.get_cost_from_world_x_y(goal_x,goal_y)>0:
-            print("the goal {:.2f},{:.2f} is an obstacle, search for near alternative...".format(goal_x,goal_y))
-            cell_x,cell_y=self.get_costmap_x_y(goal_x,goal_y)
-
-            new_x,new_y,_=self.get_closest_cell_under_cost( cell_x, cell_y, 1,min_radius, max_radius)
-            if new_x<0 and new_y<0:
-                print("feasible goal not found")
-                return None
-            new_goal_x,new_goal_y= self.get_world_x_y(new_x,new_y)
-            goal.target_pose.pose.position.x=new_goal_x
-            goal.target_pose.pose.position.y=new_goal_y
-
-            dist= ( (goal_x-new_goal_x)**2 +  (goal_y-new_goal_y)**2)**0.5
-            print("new goal found: {:.2f},{:.2f}\n\t at distance {:.2f} from previous goal".format(
-                new_goal_x,new_goal_y,dist))
-
-            self.goal=goal
-            return goal
-        #goal not obstacle
-        self.goal=goal
-        return goal
-
-    def check_goal(self):
-        goal=self.goal
-        goal_x=goal.target_pose.pose.position.x
-        goal_y=goal.target_pose.pose.position.y
-        if self.get_cost_from_world_x_y(goal_x,goal_y)>0: 
-            print("The goal {:.2f},{:.2f} is an obstacle".format(goal_x,goal_y))
-            return False
-        print("The goal {:.2f},{:.2f} is OK!".format(goal_x,goal_y))
-        return True
-
+    
     def get_closest_cell_over_cost(self, x, y, cost_threshold, max_radius):
         """
         Looks from closest to furthest in a circular way for the first cell
@@ -327,16 +376,17 @@ class OccupancyGridManager(object):
         :param cost_threshold int: minimum threshold to look for
         :param max_radius int: maximum number of cells around to check
         """
-        return self._get_closest_cell_arbitrary_cost(
+        return self.get_closest_cell_arbitrary_cost(
             x, y, cost_threshold, max_radius, bigger_than=True)
 
-    def _get_closest_cell_arbitrary_cost(self, x, y,
+    # main function to search for a new cell-point in costmap around (x,y)
+    def get_closest_cell_arbitrary_cost(self, x, y,
                                          cost_threshold,min_radius=1, max_radius=100000,
                                          bigger_than=False):
 
         # Check the actual goal cell
         try:
-            cost = self.get_cost_from_costmap_x_y(x, y)
+            cost = self.get_cell_value_from_costmap_x_y(x, y)
         except IndexError:
             return None
 
@@ -381,17 +431,17 @@ class OccupancyGridManager(object):
             #       str((x + tmp_x, y + tmp_y)) +
             #       " (" + str(idx) + " / " + str(len(coords_to_explore)) + ")")
             try:
-                cost = self.get_cost_from_costmap_x_y(x + tmp_x, y + tmp_y)
+                cost = self.get_cell_value_from_costmap_x_y(x + tmp_x, y + tmp_y)
             # If accessing out of grid, just ignore
             except IndexError:
                 pass
             if bigger_than:
                 if cost > cost_threshold:
-                    return x + tmp_x, y + tmp_y, cost
+                    return (x + tmp_x, y + tmp_y, cost)
 
             else:
                 if cost < cost_threshold:
-                    return x + tmp_x, y + tmp_y, cost
+                    return (x + tmp_x, y + tmp_y, cost)
 
         return -1, -1, -1
 
@@ -416,8 +466,8 @@ def search_feasible_goal(ogm,goal_x,goal_y):
     goal_x=goal.target_pose.pose.position.x
     goal_y=goal.target_pose.pose.position.y
     radius=0.1
-    while ogm.get_cost_from_world_x_y(goal_x,goal_y)>0:
-        #print("costmap value",ogm.get_cost_from_world_x_y(goal_x,goal_y))
+    while ogm.get_cell_value_from_world_x_y(goal_x,goal_y)>0:
+        #print("costmap value",ogm.get_cell_value_from_world_x_y(goal_x,goal_y))
 
         #try 5 points around the circle
         attempts=10
@@ -434,7 +484,7 @@ def search_feasible_goal(ogm,goal_x,goal_y):
             print("attempting goal: ",goal_x,goal_y)
 
 
-            if ogm.get_cost_from_world_x_y(goal_x,goal_y)<=0: break
+            if ogm.get_cell_value_from_world_x_y(goal_x,goal_y)<=0: break
         
         radius+= 0.2
 

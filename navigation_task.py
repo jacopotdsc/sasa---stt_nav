@@ -17,23 +17,22 @@ import math
 import random
 
 
+# a data structure which able me to discard oldest elemnt
+# when I want to add a new one into the array
+# I keep there data structure outside the class in a way that, If the program
+# is spinning, all times I create a new object NavigationManager with an empty structure
+old_odom_msg = deque(maxlen=60)
+
 class NavigationManager(object):
     def __init__(self, topic):
+
         # OccupancyGrid starts on lower left corner
-        self.odometry_msg= None
-
-        # a data structure which able me to discard oldest elemnt
-        # when I want to add a new one into the array
-        self.old_odometry_msg_array = deque(maxlen=60)
-
+        self.odom_msg= None
         self.goal = None
-
-        
         self.recovery_goal = None   # used when robot is stuck to move it in and old position
         self.is_stuck = False      
 
-        self.my_sub = rospy.Subscriber(topic, Odometry,self.my_callback_pose,queue_size=1)    
-        
+        self.my_sub = rospy.Subscriber(topic, Odometry,self.my_callback_nav,queue_size=1)    
         
         self.distance=0
         self.prev_distance=0
@@ -48,28 +47,29 @@ class NavigationManager(object):
 
         print("NavigationManager for '" + str(self.my_sub.resolved_name) + "' initialized!")
 
-    def my_callback_pose(self, data):
+    def my_callback_nav(self, data):
 
         # I keep a record of some odometry_msg
-        previous_odom_msg = self.odometry_msg
+        previous_odom_msg = self.odom_msg
         
         # I record message with a distance of 2 second, with a maxium record 2*60
         # if max_stuck_time is 60, in the last minute I have same poses, so I record last 2 minutes
-        time_distance = int( round(( self.old_odometry_msg_array[-1].header.stamp.nsec - data.header.stamp.nsec )) )
+        if len(old_odom_msg) > 0:
+            time_distance = int( round(( old_odom_msg[-1].header.stamp.nsec - data.header.stamp.nsec )) )
         
-        if len(self.old_odometry_msg_array) > 0 and  time_distance >= 2 and self.is_stuck==False:
-            self.old_odometry_msg_array.append( previous_odom_msg )
+        if len(old_odom_msg) > 0 and  time_distance >= 2 and self.is_stuck==False:
+            self.old_odom_msg.append( previous_odom_msg )
 
         # self.distance it was the distance calculate of the previous msf
         # now I have to calculate the new distance
         if self.distance: self.prev_distance = self.distance
 
         # I put new message into the class
-        self.odometry_msg = data
+        self.odom_msg = data
 
         if self.goal:
-            pose_x=self.new_odometry_msg.pose.pose.position.x
-            pose_y=self.new_odometry_msg.pose.position.y
+            pose_x=self.odom_msg.pose.pose.position.x
+            pose_y=self.odom_msg.pose.position.y
             goal_x=self.goal.target_pose.pose.position.x
             goal_y=self.goal.target_pose.pose.position.y
 
@@ -118,25 +118,46 @@ class NavigationManager(object):
         # with the right structure
         # and say to rover to go there and try a new path
 
+        # one idea: If my robot is stuck and can't reach the goal
+        # I can try to analize the robot's state 10 second before and look for another point
+        # or for another path.
+        # In the first case, I can select a point near the goal randomly.
+        # In the second case, I can try to find a new path without crossing
+        # cells bring the robot in stuck-state
+
+        # If one of two cases is succesfull, 
+        # I say to rover to go in (x,y) of the previous state and execute the action
+        # Else I can back 15 second before and repeat everything.
+
+        # If nothing work -> manual command
+        # or
+        # Go back is the first state ( where rover start )
+        # and make new a new plan without crossing cells that
+        # he already crossed if this cells are 2 meters near
+        # to the cell that bring him to stuck-state
+
         return
 
 
 class OccupancyGridManager(object):
     def __init__(self, topic, subscribe_to_updates=False):
         # OccupancyGrid starts on lower left corner
-        self._grid_data = None
-        self._occ_grid_metadata = None
-        self._reference_frame = None
-        self._sub = rospy.Subscriber(topic, OccupancyGrid,
-                                     self._occ_grid_cb,
+        self.occ_grid_msg = None
+        self.grid_map = None
+        self.metadata = None
+        self.sub_occ_grid = rospy.Subscriber(topic, OccupancyGrid,
+                                     self.my_callback_occ,
                                      queue_size=1)
         self.goal=None
+
         print("Waiting for '" +
                       str(self._sub.resolved_name) + "'...")
         
         while self._occ_grid_metadata is None and \
-                self._grid_data is None and not rospy.is_shutdown():
+                self.grid_map is None and not rospy.is_shutdown():
             rospy.sleep(0.1)
+        
+        '''
         print("OccupancyGridManager for '" +
                       str(self._sub.resolved_name) +
                       "' initialized!")
@@ -145,27 +166,27 @@ class OccupancyGridManager(object):
                       ", starting from bottom left corner of the grid. " + 
                       " Reference_frame: " + str(self.reference_frame) +
                       " origin: " + str(self.origin))
-
+        '''
 
     @property
     def resolution(self):
-        return self._occ_grid_metadata.resolution
+        return self.metadata.resolution
 
     @property
     def width(self):
-        return self._occ_grid_metadata.width
+        return self.metadata.width
 
     @property
     def height(self):
-        return self._occ_grid_metadata.height
+        return self.metadata.height
 
     @property
     def origin(self):
-        return self._occ_grid_metadata.origin
+        return self.metadata.origin
 
     @property
     def reference_frame(self):
-        return self._reference_frame
+        return self.occ_grid_msg.data.header._reference_frame
 
     def set_goal(self,goal):
         self.goal=goal
@@ -177,21 +198,26 @@ class OccupancyGridManager(object):
         return x,y
 
     #update occupancy grid and goal when new map received
-    def _occ_grid_cb(self, data):
-        #print("Got a full OccupancyGrid update")
-        self._occ_grid_metadata = data.info
-        # Contains resolution, width & height
+    def my_callback_occ(self, data):
+        
+        # save whole message
+        self.occ_grid_msg = data
+
+        # map_load_time, resolution, width, height, origin (geometry_msgs/Pose)
+        self.metadata = data.info
+
         # np.set_printoptions(threshold=99999999999, linewidth=200)
         # data comes in row-major order http://docs.ros.org/en/melodic/api/nav_msgs/html/msg/OccupancyGrid.html
         # first index is the row, second index the column
-        self._grid_data = np.array(data.data,
-                                   dtype=np.int8).reshape(data.info.height,
-                                                          data.info.width)
-        self._reference_frame = data.header.frame_id
+
+        #self.grid_map = np.array(data.data,dtype=np.int8).reshape(data.info.height,data.info.width)
+
+        self.grid_map = data.data
+        #self.frame_grid = np.zeros((self.height, self.width,1), dtype="uint8")
+        self.frame_grid = np.CreateMat(self.height, self.width, np.CV_8UC1)
 
         if self.goal:
             self.goal=self.update_goal()
-        # print(self._grid_data)
 
     #world coordinates from costmap cells
     def get_world_x_y(self, costmap_x, costmap_y):
@@ -224,7 +250,7 @@ class OccupancyGridManager(object):
         if self.is_in_gridmap(x, y):
             # data comes in row-major order http://docs.ros.org/en/melodic/api/nav_msgs/html/msg/OccupancyGrid.html
             # first index is the row, second index the column
-            return self._grid_data[y][x]
+            return self.grid_map[y][x]
         else:
             raise IndexError(
                 "Coordinates out of gridmap, x: {}, y: {} must be in between: [0, {}], [0, {}]".format(

@@ -24,6 +24,9 @@ import random
 old_odom_msg = deque(maxlen=60)
 first_state = None
 
+# dizionary <coordinate cell, original value>
+temp_occupied_cell = {}
+
 class NavigationManager(object):
     def __init__(self, topic, my_OccupancyGridManager):
 
@@ -31,12 +34,15 @@ class NavigationManager(object):
         # OccupancyGrid starts on lower left corner
         self.odom_msg= None
         self.goal = None
-        self.recovery_goal = None   # used when robot is stuck to move it in and old position, NOT USED
+        self.recovery_position = None   # used when robot is stuck to move it in and old position, NOT USED
         self.is_stuck = False      
+
 
         self.my_sub = rospy.Subscriber(topic, Odometry,self.my_callback_nav,queue_size=1)    
         
         self.distance=0
+        self.recovery_distance = None
+
         self.prev_distance=0
         self.struck_threshold=0.5      # how much distance to consider as not stuck
         self.max_stuck_time=60
@@ -114,6 +120,17 @@ class NavigationManager(object):
     def get_stuck_time(self):
         return abs(rospy.get_time()-self.stuck_time)
    
+    def set_recovery_position(self, recovery_position):
+        self.recovery_position = recovery_position
+
+    def set_recovery_distance(self, recovery_distance):
+        self.recovery_distance = recovery_distance
+
+    def clear_recovery_state(self):
+        self.recovery_position = None
+        self.recovery_distance = None
+        self.is_struck = False
+
     def recovery_behavior(self):
         '''
         # start a routine which examine all old_odom_msg
@@ -142,15 +159,10 @@ class NavigationManager(object):
         # to the cell that bring him to stuck-state
         '''
 
-        # dizionary <coordinate cell, original value>
-        temp_occupied_cell = {}
-        
-        previous_analized_state = None
-
         # If I have recorded 120 sec and my stuck-time is 60 sec
         # half of message have the same position / state 
         effective_len = len(old_odom_msg) / 2
-
+        recovery_result = False
         for i in range( round( effective_len )):
             
             # I start from the most recent message
@@ -160,20 +172,85 @@ class NavigationManager(object):
             pos_y = msg.pose.pose.position.y
 
             # old_state is the previous position where robot should go
-            old_state = self.my_OccupancyGridManager.world2grid(pos_x, pos_y)
+            previous_position = self.my_OccupancyGridManager.world2grid(pos_x, pos_y)
+            result = self.send_recovery_position(previous_position)
 
+            # save original value of the cell into the dictionary and set it as occupied
+            # to let the planner find a new path without the crossed cell
+            temp_occupied_cell[previous_position] = self.my_OccupancyGridManager[previous_position[0]][previous_position[1]]
+            self.my_OccupancyGridManager[previous_position[0]][previous_position[1]] = 100
+
+            if result == False:
+                continue
+            else:
+                recovery_result = True
+                break
             # now I must sign as occupied cells, all cells which are crossed
             # by the rover between actual_position and old_state
-            
-            # to send the goal, I shoudl use function "send_goal" of the other script
-            # or line below in the commented section in main function
 
         # restore original value
-        for cell in temp_occupied_cell.keys():
-            self.my_OccupancyGridManager[cell[0]][cell[1]] = temp_occupied_cell[cell]
 
+        # if I robot is no longer stuck -> find a new path
+        if recovery_result == True:
+
+            # I say to the planner to calculate a path to the original goal
+            self.send_recovery_position(self.goal)
+        
+        else:
+            print("!!! NOTHING WORKED -> go in manual !!!")
+
+        #### IMPORTANT ###
+        # create a mechanism to understand if robot is already stuck
+        self.clear_recovery_state()
         return
+    
+    def send_recovery_position(self, recovery_position):
 
+        client = actionlib.SimpleActionClient('move_base', MoveBaseAction)
+        client.wait_for_server()
+
+        ogm = self.my_OccupancyGridManager
+
+        goal_x = recovery_position[0]
+        goal_y = recovery_position[1]
+        
+        goal = MoveBaseGoal()
+        goal.target_pose.header.frame_id = "map"
+        goal.target_pose.header.stamp = rospy.Time.now()
+        goal.target_pose.pose.position = Point(goal_x,goal_y,0.0)
+        goal.target_pose.pose.orientation = Quaternion(0.0, 0.0, 0.0, 1.0)
+    
+        ogm.set_recovery_position(goal)   
+        self.set_recovery_position(goal)
+
+        #print goal
+        goal_x=goal.target_pose.pose.position.x
+        goal_y=goal.target_pose.pose.position.y
+
+        client.send_goal(goal)
+
+        # this cicle wait the rover to reach the position "goal" ?
+        while not client.wait_for_result(rospy.Duration.from_sec(1.0)):
+
+            #print("Waiting for result...")
+            goal_x = goal.target_pose.pose.position.x
+            goal_y = goal.target_pose.pose.position.y
+            
+        
+        #check if waypoint reached
+        actual_pose_x = self.origin.position.x
+        actual_pose_y = self.origin.position.y
+
+        recovery_distance = math.sqrt( (goal_x - actual_pose_x)**2 + (goal_y - actual_pose_y)**2 )
+
+        if recovery_distance < 2.5:
+            print("GOAL REACHED! distance from goal:",recovery_distance)
+            print("Let the planner calculate a new path ... ")
+            return True
+        else:
+            print("GOAL NOT REACHED!! distance from goal is:",recovery_distance)
+            print("!! NOT ABLE RO REACH PREVIOUS POSITION -> trying another older position !!!")
+            return False
 
 class OccupancyGridManager(object):
     def __init__(self, topic, subscribe_to_updates=False):
@@ -185,6 +262,7 @@ class OccupancyGridManager(object):
                                      self.my_callback_occ,
                                      queue_size=1)
         self.goal=None
+        self.recovery_position = None
 
         print("Waiting for '" +
                       str(self._sub.resolved_name) + "'...")
@@ -227,6 +305,9 @@ class OccupancyGridManager(object):
     def set_goal(self,goal):
         self.goal=goal
         self.update_goal()
+
+    def set_recovery_position(self, recovery_position):
+        self.recovery_position = recovery_position
 
     def get_goal_coord(self):
         x=self.goal.target_pose.pose.position.x
@@ -526,6 +607,8 @@ def search_feasible_goal(ogm,goal_x,goal_y):
 
     return goal
 
+
+
 def main():
     rospy.init_node('navigation_goals')
     
@@ -535,104 +618,6 @@ def main():
 
     client = actionlib.SimpleActionClient('move_base', MoveBaseAction)
     client.wait_for_server()
-    
-    '''
-    #waypoints to reach
-    waypoints=[
-        [9.822, 0.231],
-        [9.692, 3.729],
-        [33.932, 2.475]]
-    WAYPOINT_REACHED=False
-    #w_idx=2
-    while w_idx < len(waypoints):
-        waypoint=waypoints[w_idx]
-        #print
-        
-        
-        cell_x,cell_y=ogm.get_costmap_x_y(waypoint[0],waypoint[1])
-
-        if not ogm.is_in_gridmap(cell_x, cell_y): 
-            print("WAYPOINT {:.2f},{:.2f} OUTSIDE OF MAP! Search for nearest one".format(waypoint[0],waypoint[1]))
-            #this has to be reached yet, current one will change
-            waypoints.append(waypoint)
-        while not ogm.is_in_map(waypoint[0], waypoint[1]): 
-            #create intermediate waypoint
-            waypoint=get_intermediate_waypoint(nvm.get_position(),waypoint,0.5)
-            print("intermediate waypoint: ",waypoint)
-        
-        print("\nREACHING WAYPOINT: " + str(waypoint))
-        goal_x,goal_y=waypoint
-
-        #search for a feasible goal
-        #goal=search_feasible_goal(ogm,goal_x,goal_y)
-
-        
-        goal = MoveBaseGoal()
-        goal.target_pose.header.frame_id = "map"
-        goal.target_pose.header.stamp = rospy.Time.now()
-        goal.target_pose.pose.position = Point(goal_x,goal_y,0.0)
-        goal.target_pose.pose.orientation = Quaternion(0.0, 0.0, 0.0, 1.0)
-        ogm.set_goal(goal)
-        
-        nvm.set_goal(goal)
-
-        #print goal
-        goal_x=goal.target_pose.pose.position.x
-        goal_y=goal.target_pose.pose.position.y
-        #print("sending goal: {} {}".format(goal_x,goal_y))
-        ogm.check_goal()
-
-        client.send_goal(goal)
-
-        while not client.wait_for_result(rospy.Duration.from_sec(1.0)):
-
-            #print("Waiting for result...")
-            goal_x=goal.target_pose.pose.position.x
-            goal_y=goal.target_pose.pose.position.y
-
-            #check fi goal has been updated
-            if ogm.get_goal_coord() != (goal_x,goal_y):
-                print("goal has been changed")
-                client.send_goal(ogm.goal)
-                nvm.set_goal(ogm.goal)
-
-            
-            #custom search for goal
-            value=ogm.get_cost_from_world_x_y(goal_x,goal_y)
-            if value>0:
-                print("goal not valid")
-                goal=search_feasible_goal(ogm,goal_x,goal_y)
-                nvm.set_goal(goal)
-                print("new_goal:",goal.target_pose.pose.position.x,goal.target_pose.pose.position.y)
-            #print("check for costmap update: ", goal_x, goal_y,"value: ", value)
-            
-        
-        #check if waypoint reached
-        distance= nvm.distance
-        if distance<2.5:
-            print("GOAL REACHED! distance from goal:",distance)
-            WAYPOINT_REACHED=True
-            #proceed with next waypoint
-            w_idx+=1
-        else:
-            print("GOAL NOT REACHED!! distance from goal is:",distance)
-            #remain on current keypoint
-        
-        if nvm.get_stuck_time()>30:
-            client.send_goal(ogm.goal)
-            nvm.set_goal(ogm.goal)
-
-        #if reached waypoint do an operation
-        if WAYPOINT_REACHED:
-            print("\n\nPERFORMING AN OPERATION\n\n")
-            rospy.sleep(10)
-            #Do operation
-
-
-        
-    print("NAVIGATION TASK FINISHED")
-    print("waypoits reached:",waypoints)
-    '''
 
 if __name__ == '__main__':
     print("Starting navigation task...")

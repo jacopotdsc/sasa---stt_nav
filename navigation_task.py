@@ -1,8 +1,44 @@
 # node that sends position to reach for move_base
 # if position is an obstacle, send a new position in a radius around the current position
-# check if robot is stuck
-# when a goal is reached, send a new goal
-# not used in the project yet, to be improved
+# check if robot is stuck, in case it active a recovery behavior.
+
+
+'''
+###############################
+###### HOW WORK MOVE BASE #####
+###############################
+
+
+look at the graphic on documentation.
+When I start "move_base" with rtamap started, 
+I have this situation:
+
+N.B: difference between grid_map and cost_map ( stupid explanation )
+        - grid_map: cells can have only value 0 ( free ) or 100 ( occupied )
+        - cost_map: cells have all integer value between 0 and 100
+
+
+- User has a map in world_coordinate ( with rviz I send a goal in world_coordinate to the rover )
+- Rover has a map in cell_coordinate ( grid_map / cost_map. This two map have the "same" meaning)
+- global planner:   a process which calculate a path from start_position of the rover 
+                    to the goal_position sent with rviz ( or with code in the main)
+                    using the cost_map knew by the rover ( I'm not sure it use the cost_map, but this is the idea)
+- local planner: a process the calculate costanly what the rover should do sending cmd_vel
+
+knowing that, I thought this:
+If my rover is in [8,8] and is going to [10,10].
+If is stuck in cell [10,10] for unknow reason
+I say to the rover to go back in a previous position, for example in [8,8] and meawhile sign
+cell [10, 10] as occupied. In that way local planner ( or global planner, I don't understood) 
+should calculate a new path considering that the cell [10,10] as occupied ( before was free ).
+Repeat this steps if I can't find a path from [8,8], maybe going back to [6,5].
+
+We could improve this mechanis signing as occupied all cell crossed by the rover while going from 
+[8,8] to [10,10], so cell crossed before getting stuck.
+In general cells cross from [10,10] to [8,8] can be different
+
+'''
+
 import rospy
 import actionlib
 from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
@@ -17,16 +53,19 @@ import math
 import random
 
 
-# a data structure which able me to discard oldest elemnt
+# a data structure which able me to discard oldest element ( if len = 60, and I append the 61°, the first one is discarded automatically)
 # when I want to add a new one into the array
 # I keep there data structure outside the class in a way that, If the program
 # is spinning, all times I create a new object NavigationManager with an empty structure
 old_odom_msg = deque(maxlen=60)
 first_state = None
 
-# dizionary <coordinate cell, original value>
+# dizionary <coordinate cell, original value>, used to save original value of cell 
+# I change value of some cells during the recovery behavior
 temp_occupied_cell = {}
 
+# This class is the one which ear the message and 
+# manage the rover's behavior.
 class NavigationManager(object):
     def __init__(self, topic, my_OccupancyGridManager):
 
@@ -55,6 +94,7 @@ class NavigationManager(object):
 
         print("NavigationManager for '" + str(self.my_sub.resolved_name) + "' initialized!")
 
+    # function to active when read a new message on the topic
     def my_callback_nav(self, data):
 
         if first_state is None:
@@ -126,11 +166,13 @@ class NavigationManager(object):
     def set_recovery_distance(self, recovery_distance):
         self.recovery_distance = recovery_distance
 
+    # a simply clear
     def clear_recovery_state(self):
         self.recovery_position = None
         self.recovery_distance = None
         self.is_struck = False
 
+    # main function for recovery behavior
     def recovery_behavior(self):
         '''
         # start a routine which examine all old_odom_msg
@@ -161,6 +203,9 @@ class NavigationManager(object):
 
         # If I have recorded 120 sec and my stuck-time is 60 sec
         # half of message have the same position / state 
+
+        print("original goal: {}".format(self.goal))
+
         effective_len = len(old_odom_msg) / 2
         recovery_result = False
         for i in range( round( effective_len )):
@@ -173,7 +218,14 @@ class NavigationManager(object):
 
             # old_state is the previous position where robot should go
             previous_position = self.my_OccupancyGridManager.world2grid(pos_x, pos_y)
+
+            print("previous_pose: {}".format(previous_position))
             result = self.send_recovery_position(previous_position)
+            
+            if result == True:
+                print("recovery position procedure: SUCCESS")
+            else:
+                print("recovery position procedure: FAILED")
 
             # save original value of the cell into the dictionary and set it as occupied
             # to let the planner find a new path without the crossed cell
@@ -194,6 +246,7 @@ class NavigationManager(object):
         if recovery_result == True:
 
             # I say to the planner to calculate a path to the original goal
+            print("Recovery result success! Going to: ".format(self.goal))
             self.send_recovery_position(self.goal)
         
         else:
@@ -202,14 +255,19 @@ class NavigationManager(object):
         #### IMPORTANT ###
         # create a mechanism to understand if robot is already stuck
         self.clear_recovery_state()
+        print("resuming.")
         return
-    
+
+    # auxiliary function for recovery_behavior
+    # it send the new point to be reached ( at least should send it ) 
     def send_recovery_position(self, recovery_position):
 
         client = actionlib.SimpleActionClient('move_base', MoveBaseAction)
         client.wait_for_server()
 
         ogm = self.my_OccupancyGridManager
+
+        print("\trecovery position: {}".format(recovery_position))
 
         goal_x = recovery_position[0]
         goal_y = recovery_position[1]
@@ -227,6 +285,7 @@ class NavigationManager(object):
         goal_x=goal.target_pose.pose.position.x
         goal_y=goal.target_pose.pose.position.y
 
+        print("\tsending new point to reach: {}".format(goal))
         client.send_goal(goal)
 
         # this cicle wait the rover to reach the position "goal" ?
@@ -244,14 +303,16 @@ class NavigationManager(object):
         recovery_distance = math.sqrt( (goal_x - actual_pose_x)**2 + (goal_y - actual_pose_y)**2 )
 
         if recovery_distance < 2.5:
-            print("GOAL REACHED! distance from goal:",recovery_distance)
-            print("Let the planner calculate a new path ... ")
+            print("\tPOINT REACHED! distance from point:",recovery_distance)
+            print("\tLet the planner calculate a new path ... ")
             return True
         else:
-            print("GOAL NOT REACHED!! distance from goal is:",recovery_distance)
-            print("!! NOT ABLE RO REACH PREVIOUS POSITION -> trying another older position !!!")
+            print("\tPOINT NOT REACHED!! distance from point is:",recovery_distance)
+            print("\t!! NOT ABLE RO REACH PREVIOUS POSITION -> trying another older position !!!")
             return False
 
+
+# This class is the one that modify the GridMap
 class OccupancyGridManager(object):
     def __init__(self, topic, subscribe_to_updates=False):
         # OccupancyGrid starts on lower left corner
@@ -314,7 +375,7 @@ class OccupancyGridManager(object):
         y=self.goal.target_pose.pose.position.y
         return x,y
 
-    #update occupancy grid and goal when new map received
+    #function called when ear a message: update occupancy grid and goal when new map received
     def my_callback_occ(self, data):
         
         # save whole message
@@ -465,6 +526,7 @@ class OccupancyGridManager(object):
             print("The goal {:.2f},{:.2f} is OK!".format(goal_x,goal_y))
             return True
 
+    # this function are called on "update_goal", no worry about them
     def get_closest_cell_under_cost(self, x, y, cost_threshold,min_radius, max_radius):
         """
         Looks from closest to furthest in a circular way for the first cell
@@ -560,6 +622,8 @@ class OccupancyGridManager(object):
         return -1, -1, -1
 
 
+
+### just some functions ###
 def get_new_goal(goal_x,goal_y,radius=1,angle=0):
     # return a new goal in a radius around the current goal
     # get random angle
@@ -629,9 +693,9 @@ def main():
     client.wait_for_server()
 
     waypoints = [ 
-        [7.22, -6.36],
-        [7.62, -11.17],
-        [-0.34, -16,70]
+        [7.22, -6.36],      # for positioning
+        [7.62, -11.17],     # encounter first obstacle
+        [-0.34, -16,70]     # should need to recalculate another path to reach this point
           ]
 
     WAYPOINT_REACHED=False
@@ -644,20 +708,13 @@ def main():
         cell_x,cell_y=ogm.world2cost(waypoint[0],waypoint[1])
 
         if not ogm.is_in_gridmap(cell_x, cell_y): 
-            print("WAYPOINT {:.2f},{:.2f} OUTSIDE OF MAP! Search for nearest one".format(waypoint[0],waypoint[1]))
+            print("[MAIN] WAYPOINT {:.2f},{:.2f} OUTSIDE OF MAP! Search for nearest one".format(waypoint[0],waypoint[1]))
             #this has to be reached yet, current one will change
             waypoints.append(waypoint)
-        while not ogm.is_in_map(waypoint[0], waypoint[1]): 
-            #create intermediate waypoint
-            waypoint=get_intermediate_waypoint(nvm.get_position(),waypoint,0.5)
-            print("intermediate waypoint: ",waypoint)
         
-        print("\nREACHING WAYPOINT: " + str(waypoint))
-        goal_x,goal_y=waypoint
-
-        #search for a feasible goal
-        #goal=search_feasible_goal(ogm,goal_x,goal_y)
-
+        
+        print("[MAIN] REACHING WAYPOINT: " + str(waypoint))
+        goal_x,goal_y = waypoint
         
         goal = MoveBaseGoal()
         goal.target_pose.header.frame_id = "map"
@@ -671,20 +728,21 @@ def main():
         #print goal
         goal_x=goal.target_pose.pose.position.x
         goal_y=goal.target_pose.pose.position.y
-        #print("sending goal: {} {}".format(goal_x,goal_y))
+
+        print("[MAIN] sending goal: {} {}".format(goal_x,goal_y))
         ogm.check_goal()
 
         client.send_goal(goal)
 
         while not client.wait_for_result(rospy.Duration.from_sec(1.0)):
 
-            print("Waiting for result...")
+            print("[MAIN] Waiting for result...")
             goal_x=goal.target_pose.pose.position.x
             goal_y=goal.target_pose.pose.position.y
 
             #check fi goal has been updated
             if ogm.get_goal_coord() != (goal_x,goal_y):
-                print("goal has been changed")
+                print("[MAIN] goal has been changed")
                 client.send_goal(ogm.goal)
                 nvm.set_goal(ogm.goal)
 
@@ -692,22 +750,22 @@ def main():
             #custom search for goal
             value=ogm.get_cost_from_world_x_y(goal_x,goal_y)
             if value>0:
-                print("goal not valid")
+                print("[MAIN] goal not valid")
                 goal=search_feasible_goal(ogm,goal_x,goal_y)
                 nvm.set_goal(goal)
-                print("new_goal:",goal.target_pose.pose.position.x,goal.target_pose.pose.position.y)
+                print("[MAIN] new_goal:",goal.target_pose.pose.position.x,goal.target_pose.pose.position.y)
             #print("check for costmap update: ", goal_x, goal_y,"value: ", value)
             '''
         
         #check if waypoint reached
         distance= nvm.distance
         if distance<2.5:
-            print("GOAL REACHED! distance from goal:",distance)
+            print("[MAIN] GOAL REACHED! distance from goal:",distance)
             WAYPOINT_REACHED=True
             #proceed with next waypoint
             w_idx+=1
         else:
-            print("GOAL NOT REACHED!! distance from goal is:",distance)
+            print("[MAIN] GOAL NOT REACHED!! distance from goal is:",distance)
             #remain on current keypoint
         
         if nvm.get_stuck_time()>30:
@@ -716,14 +774,17 @@ def main():
 
         #if reached waypoint do an operation
         if WAYPOINT_REACHED:
-            print("\n\nPERFORMING AN OPERATION\n\n")
+            print("\n\n[MAIN] PERFORMING AN OPERATION\n\n")
             rospy.sleep(10)
-            #Do operation
+            
+            ###### HERE SHOULD CALL THE RECOVERY BEHAVIOR OR SEND A NEW FEASIBLE GOAL ####
+
+
 
 
         
-    print("NAVIGATION TASK FINISHED")
-    print("waypoits reached:",waypoints)
+    print("[MAIN] NAVIGATION TASK FINISHED")
+    print("[MAIN] waypoits reached:",waypoints)
 
 if __name__ == '__main__':
     print("Starting navigation task...")

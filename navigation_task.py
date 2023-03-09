@@ -265,9 +265,9 @@ class OccupancyGridManager(object):
         self.recovery_position = None
 
         print("Waiting for '" +
-                      str(self._sub.resolved_name) + "'...")
+                      str(self.sub_occ_grid.resolved_name) + "'...")
         
-        while self._occ_grid_metadata is None and \
+        while self.metadata is None and \
                 self.grid_map is None and not rospy.is_shutdown():
             rospy.sleep(0.1)
         
@@ -607,7 +607,16 @@ def search_feasible_goal(ogm,goal_x,goal_y):
 
     return goal
 
-
+#get x,y coordinates between two points
+def get_intermediate_waypoint(w1,w2,step):
+    #step=[0,1] is how much near to x1 it is
+    x1=w1[0]
+    y1=w1[1]
+    x2=w2[0]
+    y2=w2[1]
+    x=x1+(x2-x1)*step
+    y=y1+(y2-y1)*step
+    return x,y
 
 def main():
     rospy.init_node('navigation_goals')
@@ -618,6 +627,103 @@ def main():
 
     client = actionlib.SimpleActionClient('move_base', MoveBaseAction)
     client.wait_for_server()
+
+    waypoints = [ 
+        [7.22, -6.36],
+        [7.62, -11.17],
+        [-0.34, -16,70]
+          ]
+
+    WAYPOINT_REACHED=False
+    w_idx = 0
+    while w_idx < len(waypoints):
+        waypoint=waypoints[w_idx]
+        #print
+        
+        
+        cell_x,cell_y=ogm.world2cost(waypoint[0],waypoint[1])
+
+        if not ogm.is_in_gridmap(cell_x, cell_y): 
+            print("WAYPOINT {:.2f},{:.2f} OUTSIDE OF MAP! Search for nearest one".format(waypoint[0],waypoint[1]))
+            #this has to be reached yet, current one will change
+            waypoints.append(waypoint)
+        while not ogm.is_in_map(waypoint[0], waypoint[1]): 
+            #create intermediate waypoint
+            waypoint=get_intermediate_waypoint(nvm.get_position(),waypoint,0.5)
+            print("intermediate waypoint: ",waypoint)
+        
+        print("\nREACHING WAYPOINT: " + str(waypoint))
+        goal_x,goal_y=waypoint
+
+        #search for a feasible goal
+        #goal=search_feasible_goal(ogm,goal_x,goal_y)
+
+        
+        goal = MoveBaseGoal()
+        goal.target_pose.header.frame_id = "map"
+        goal.target_pose.header.stamp = rospy.Time.now()
+        goal.target_pose.pose.position = Point(goal_x,goal_y,0.0)
+        goal.target_pose.pose.orientation = Quaternion(0.0, 0.0, 0.0, 1.0)
+        ogm.set_goal(goal)
+        
+        nvm.set_goal(goal)
+
+        #print goal
+        goal_x=goal.target_pose.pose.position.x
+        goal_y=goal.target_pose.pose.position.y
+        #print("sending goal: {} {}".format(goal_x,goal_y))
+        ogm.check_goal()
+
+        client.send_goal(goal)
+
+        while not client.wait_for_result(rospy.Duration.from_sec(1.0)):
+
+            print("Waiting for result...")
+            goal_x=goal.target_pose.pose.position.x
+            goal_y=goal.target_pose.pose.position.y
+
+            #check fi goal has been updated
+            if ogm.get_goal_coord() != (goal_x,goal_y):
+                print("goal has been changed")
+                client.send_goal(ogm.goal)
+                nvm.set_goal(ogm.goal)
+
+            '''
+            #custom search for goal
+            value=ogm.get_cost_from_world_x_y(goal_x,goal_y)
+            if value>0:
+                print("goal not valid")
+                goal=search_feasible_goal(ogm,goal_x,goal_y)
+                nvm.set_goal(goal)
+                print("new_goal:",goal.target_pose.pose.position.x,goal.target_pose.pose.position.y)
+            #print("check for costmap update: ", goal_x, goal_y,"value: ", value)
+            '''
+        
+        #check if waypoint reached
+        distance= nvm.distance
+        if distance<2.5:
+            print("GOAL REACHED! distance from goal:",distance)
+            WAYPOINT_REACHED=True
+            #proceed with next waypoint
+            w_idx+=1
+        else:
+            print("GOAL NOT REACHED!! distance from goal is:",distance)
+            #remain on current keypoint
+        
+        if nvm.get_stuck_time()>30:
+            client.send_goal(ogm.goal)
+            nvm.set_goal(ogm.goal)
+
+        #if reached waypoint do an operation
+        if WAYPOINT_REACHED:
+            print("\n\nPERFORMING AN OPERATION\n\n")
+            rospy.sleep(10)
+            #Do operation
+
+
+        
+    print("NAVIGATION TASK FINISHED")
+    print("waypoits reached:",waypoints)
 
 if __name__ == '__main__':
     print("Starting navigation task...")

@@ -1,8 +1,0 @@
-move base:
-    [ WARN] [1678263968.415439498, 203.651000000]: Unable to get starting pose of robot, unable to create global plan
-    [ WARN] [1678263968.865761096, 203.751000000]: Clearing both costmaps outside a square (2.00m) large centered on the robot.
-    [ERROR] [1678263968.865869984, 203.751000000]: Cannot clear map because pose cannot be retrieved
-    [ WARN] [1678263970.411708582, 204.151000000]: Transform timeout for global_costmap. Current time: 204.1510, pose stamp: 202.6140, tolerance: 0.5000
-    [ WARN] [1678263970.411908331, 204.151000000]: Unable to get starting pose of robot, unable to create global plan
-    [ WARN] [1678263970.529908506, 204.176000000]: Costmap2DROS transform timeout. Current time: 204.1760, global_pose stamp: 202.6140, tolerance: 0.5000
-    [ERROR] [1678264038.736188297, 223.677000000]: Extrapolation Error looking up robot pose: Lookup would require extrapolation 11.167000000s into the past.  Requested time 202.614000000 but the earliest data is at time 213.781000000, when looking up transform from frame [base_footprint] to frame [map

@@ -58,7 +58,6 @@ import random
 # I keep there data structure outside the class in a way that, If the program
 # is spinning, all times I create a new object NavigationManager with an empty structure
 old_odom_msg = deque(maxlen=60)
-first_state = None
 
 # dizionary <coordinate cell, original value>, used to save original value of cell 
 # I change value of some cells during the recovery behavior
@@ -70,6 +69,7 @@ class NavigationManager(object):
     def __init__(self, topic, my_OccupancyGridManager):
 
         self.my_OccupancyGridManager = my_OccupancyGridManager
+        self.first_state = None
         # OccupancyGrid starts on lower left corner
         self.odom_msg= None
         self.goal = None
@@ -83,13 +83,13 @@ class NavigationManager(object):
         self.recovery_distance = None
 
         self.prev_distance=0
-        self.struck_threshold=0.5      # how much distance to consider as not stuck
+        self.stuck_threshold=0.5      # how much distance to consider as not stuck
         self.max_stuck_time=60
         self.stuck_time=rospy.get_time()    #start timer
 
         print("Waiting for '" + str(self.my_sub.resolved_name) + "'...")
 
-        while self.odometry_msg is None and not rospy.is_shutdown():
+        while self.odom_msg is None and not rospy.is_shutdown():
             rospy.sleep(0.1)
 
         print("NavigationManager for '" + str(self.my_sub.resolved_name) + "' initialized!")
@@ -97,8 +97,8 @@ class NavigationManager(object):
     # function to active when read a new message on the topic
     def my_callback_nav(self, data):
 
-        if first_state is None:
-            first_state = self.odom_msg
+        #if first_state == None:
+         #   first_state = self.odom_msg
 
         # I keep a record of some odometry_msg
         previous_odom_msg = self.odom_msg
@@ -121,7 +121,7 @@ class NavigationManager(object):
 
         if self.goal:
             pose_x=self.odom_msg.pose.pose.position.x
-            pose_y=self.odom_msg.pose.position.y
+            pose_y=self.odom_msg.pose.pose.position.y
             goal_x=self.goal.target_pose.pose.position.x
             goal_y=self.goal.target_pose.pose.position.y
 
@@ -132,7 +132,7 @@ class NavigationManager(object):
             # of a certain threshold between two message
             if self.prev_distance:
                 
-                if abs(self.prev_distance-self.distance)>self.threshold:
+                if abs(self.prev_distance-self.distance)>self.stuck_threshold:
                     print("stuck time: ",abs(rospy.get_time()-self.stuck_time))
                     self.stuck_time=rospy.get_time()
                 
@@ -229,8 +229,14 @@ class NavigationManager(object):
 
             # save original value of the cell into the dictionary and set it as occupied
             # to let the planner find a new path without the crossed cell
-            temp_occupied_cell[previous_position] = self.my_OccupancyGridManager[previous_position[0]][previous_position[1]]
-            self.my_OccupancyGridManager[previous_position[0]][previous_position[1]] = 100
+            my_grid_cell = self.my_OccupancyGridManager[previous_position[0]][previous_position[1]]
+            temp_occupied_cell[previous_position] = my_grid_cell
+
+            # Do not assign a cell value over 100
+            if my_grid_cell < 50:
+                my_grid_cell += 50
+            else:
+                my_grid_cell = 100
 
             if result == False:
                 continue
@@ -331,17 +337,6 @@ class OccupancyGridManager(object):
         while self.metadata is None and \
                 self.grid_map is None and not rospy.is_shutdown():
             rospy.sleep(0.1)
-        
-        '''
-        print("OccupancyGridManager for '" +
-                      str(self._sub.resolved_name) +
-                      "' initialized!")
-        print("Height (y / rows): " + str(self.height) +
-                      ", Width (x / columns): " + str(self.width) +
-                      ", starting from bottom left corner of the grid. " + 
-                      " Reference_frame: " + str(self.reference_frame) +
-                      " origin: " + str(self.origin))
-        '''
 
     @property
     def resolution(self):
@@ -361,7 +356,7 @@ class OccupancyGridManager(object):
 
     @property
     def reference_frame(self):
-        return self.occ_grid_msg.data.header._reference_frame
+        return self.occ_grid_msg.header.frame_id
 
     def set_goal(self,goal):
         self.goal=goal
@@ -399,6 +394,8 @@ class OccupancyGridManager(object):
         if self.goal:
             self.goal=self.update_goal()
 
+        print("[OGM] width: {}, height: {}, origin: [{}, {}]".format(self.width, self.height, self.origin.position.x, self.origin.position.y))
+
     #world coordinates from costmap cells
     def cost2world(self, costmap_x, costmap_y):
         world_x = costmap_x * self.resolution + self.origin.position.x
@@ -417,7 +414,7 @@ class OccupancyGridManager(object):
     # x, y are in grid_map coordinate
     def get_cost_point(self,grid_x,grid_y):
         if self.is_in_gridmap(grid_x,grid_y):
-            return self.grid_map[grid_x][grid_y]
+            return self.grid_map[grid_x*self.width + grid_y]
         else:
             return None
     
@@ -432,10 +429,11 @@ class OccupancyGridManager(object):
     # given a point in the world map, return his value in the costmap ( cell value )
     def get_cell_value_from_world_x_y(self, x, y):
         cx, cy = self.world2cost(x, y)
+        print("[OGM] wordl: [{}, {}] -> cost: [{},{}]".format(x,y,cx,cy))
         try:
             return self.get_cell_value_from_costmap_x_y(cx, cy)
         except IndexError as e:
-            raise IndexError("Coordinates out of grid (in frame: {}) x: {}, y: {} must be in between: [{}, {}], [{}, {}]. Internal error: {}".format(
+            raise IndexError("\nCoordinates out of grid (in frame: {}) x: {}, y: {} must be in between: [{}, {}], [{}, {}]. Internal error: {}".format(
                 self.reference_frame, x, y,
                 self.origin.position.x,
                 self.origin.position.x + self.height * self.resolution,
@@ -448,10 +446,11 @@ class OccupancyGridManager(object):
         if self.is_in_gridmap(x, y):
             # data comes in row-major order http://docs.ros.org/en/melodic/api/nav_msgs/html/msg/OccupancyGrid.html
             # first index is the row, second index the column
-            return self.grid_map[y][x]      # should not be [x][y] ? x = rows, y = cols?
+            print("[OGM] [{},{}] is in grid map".format(x,y))
+            return self.grid_map[x*self.width + y]      # should not be [x][y] ? x = rows, y = cols?
         else:
             raise IndexError(
-                "Coordinates out of gridmap, x: {}, y: {} must be in between: [0, {}], [0, {}]".format(
+                "\n[OGM] Coordinates out of gridmap, x: {}, y: {} must be in between: [0, {}], [0, {}]".format(
                     x, y, self.height, self.width))
     
 
@@ -526,7 +525,7 @@ class OccupancyGridManager(object):
             print("The goal {:.2f},{:.2f} is OK!".format(goal_x,goal_y))
             return True
 
-    # this function are called on "update_goal", no worry about them
+    # this functions are called on "update_goal", no worry about them
     def get_closest_cell_under_cost(self, x, y, cost_threshold,min_radius, max_radius):
         """
         Looks from closest to furthest in a circular way for the first cell
@@ -693,6 +692,8 @@ def main():
     client.wait_for_server()
 
     waypoints = [ 
+        [3.5, 1.6],
+        [5.0, 5.0],
         [7.22, -6.36],      # for positioning
         [7.62, -11.17],     # encounter first obstacle
         [-0.34, -16,70]     # should need to recalculate another path to reach this point
@@ -707,8 +708,9 @@ def main():
         
         cell_x,cell_y=ogm.world2cost(waypoint[0],waypoint[1])
 
+        print("[MAIN] verifing: [{}, {}]".format(cell_x, cell_y))
         if not ogm.is_in_gridmap(cell_x, cell_y): 
-            print("[MAIN] WAYPOINT {:.2f},{:.2f} OUTSIDE OF MAP! Search for nearest one".format(waypoint[0],waypoint[1]))
+            print("[MAIN] WAYPOINT [{:.2f},{:.2f}] OUTSIDE OF MAP! Search for nearest one".format(waypoint[0],waypoint[1]))
             #this has to be reached yet, current one will change
             waypoints.append(waypoint)
         
@@ -730,7 +732,7 @@ def main():
         goal_y=goal.target_pose.pose.position.y
 
         print("[MAIN] sending goal: {} {}".format(goal_x,goal_y))
-        ogm.check_goal()
+        #ogm.check_goal()
 
         client.send_goal(goal)
 
@@ -745,17 +747,6 @@ def main():
                 print("[MAIN] goal has been changed")
                 client.send_goal(ogm.goal)
                 nvm.set_goal(ogm.goal)
-
-            '''
-            #custom search for goal
-            value=ogm.get_cost_from_world_x_y(goal_x,goal_y)
-            if value>0:
-                print("[MAIN] goal not valid")
-                goal=search_feasible_goal(ogm,goal_x,goal_y)
-                nvm.set_goal(goal)
-                print("[MAIN] new_goal:",goal.target_pose.pose.position.x,goal.target_pose.pose.position.y)
-            #print("check for costmap update: ", goal_x, goal_y,"value: ", value)
-            '''
         
         #check if waypoint reached
         distance= nvm.distance

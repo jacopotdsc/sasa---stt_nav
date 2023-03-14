@@ -33,5 +33,6 @@ should calculate a new path considering that the cell [10,10] as occupied ( befo
 Repeat this steps if I can't find a path from [8,8], maybe going back to [6,5].
 
 We could improve this mechanis signing as occupied all cell crossed by the rover while going from 
-[8,8] to [10,10], so cell crossed before getting stuck.
+[8,8] to [10,10], so cell crossed before getting stuck.![navigation_overview](https://user-images.githubusercontent.com/77614941/224975383-cdc860a5-f190-47ac-890f-6613d6009532.png)
+
 In general cells cross from [10,10] to [8,8] can be different

@@ -1,7 +1,9 @@
 waypoints = [ 
-        [7.22, -6.36],
-        [7.62, -11.17],
-        [-0.34, -16,70]
+        [-15.0, 7.5],       # TEST_POINT: 2 meters away from leo initial position
+        [-12.6, 7.87],      # TEST_POINT: 5 meters away from leo initial position
+        [7.22, -6.36],      # for positioning
+        [7.62, -11.17],     # encounter first obstacle
+        [-0.34, -16,70]     # should need to recalculate another path to reach this point
           ]
 
 Sono they punti, con coordinate approssimate, intorno il marker 12.
@@ -11,14 +13,24 @@ Sono they punti, con coordinate approssimate, intorno il marker 12.
 non dovrebbe essere in grado di salire e, secondo il codice scritto,
 dovrebbe calcolare un nuovo path passando da un altro versante della montagna.
 
-
+I primi 2 punti sono di test per far muovere il rover, ma i punti convertiti sono fuori dalla grid map
 
 ERRORS:
-move base:
-    [ WARN] [1678263968.415439498, 203.651000000]: Unable to get starting pose of robot, unable to create global plan
-    [ WARN] [1678263968.865761096, 203.751000000]: Clearing both costmaps outside a square (2.00m) large centered on the robot.
-    [ERROR] [1678263968.865869984, 203.751000000]: Cannot clear map because pose cannot be retrieved
-    [ WARN] [1678263970.411708582, 204.151000000]: Transform timeout for global_costmap. Current time: 204.1510, pose stamp: 202.6140, tolerance: 0.5000
-    [ WARN] [1678263970.411908331, 204.151000000]: Unable to get starting pose of robot, unable to create global plan
-    [ WARN] [1678263970.529908506, 204.176000000]: Costmap2DROS transform timeout. Current time: 204.1760, global_pose stamp: 202.6140, tolerance: 0.5000
-    [ERROR] [1678264038.736188297, 223.677000000]: Extrapolation Error looking up robot pose: Lookup would require extrapolation 11.167000000s into the past.  Requested time 202.614000000 but the earliest data is at time 213.781000000, when looking up transform from frame [base_footprint] to frame [map
+
+Starting navigation task...
+Waiting for '/move_base/local_costmap/costmap'...
+[OGM] width: 200, height: 200, origin: [-4.95, -4.95], resolution: 0.05000000074505806
+Waiting for '/odom'...
+NavigationManager for '/odom' initialized!
+[DEBUG] world2cost: [-15.0. 7.5] -> [-201, 249]
+[DEBUG] world2cost: [-15.0. 7.5] -> [-300, 150]
+[MAIN] verifing: [-300, 150]
+[MAIN] WAYPOINT [-15.00,7.50] OUTSIDE OF MAP! Search for nearest one
+[MAIN] REACHING WAYPOINT: [-15.0, 7.5]
+[DEBUG] world2cost: [-15.0. 7.5] -> [-201, 249]
+[DEBUG] world2cost: [-15.0. 7.5] -> [-300, 150]
+[OGM] wordl: [-15.0, 7.5] -> cost: [-300,150]
+[DEBUG] world2cost: [-15.0. 7.5] -> [-201, 249]
+[DEBUG] world2cost: [-15.0. 7.5] -> [-300, 150]
+[OGM] wordl: [-15.0, 7.5] -> cost: [-300,150]
+[ERROR] [1678793046.964993, 17.748000]: bad ca

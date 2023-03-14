@@ -386,15 +386,11 @@ class OccupancyGridManager(object):
         #self.grid_map = np.array(data.data,dtype=np.int8).reshape(data.info.height,data.info.width)
 
         self.grid_map = data.data
-        #self.frame_grid = np.zeros((self.height, self.width,1), dtype="uint8")
-        #self.frame_grid = np.CreateMat(self.height, self.width, np.CV_8UC1)
-        
-        # must undestand if I need a frame_grid. I don't think
 
         if self.goal:
             self.goal=self.update_goal()
 
-        print("[OGM] width: {}, height: {}, origin: [{}, {}]".format(self.width, self.height, self.origin.position.x, self.origin.position.y))
+        print("[OGM] width: {}, height: {}, origin: [{}, {}], resolution: {}".format(self.width, self.height, self.origin.position.x, self.origin.position.y, self.metadata.resolution))
 
     #world coordinates from costmap cells
     def cost2world(self, costmap_x, costmap_y):
@@ -406,9 +402,12 @@ class OccupancyGridManager(object):
     def world2cost(self, world_x, world_y):
         costmap_x = int(round((world_x - self.origin.position.x) / self.resolution))
         costmap_y = int(round((world_y - self.origin.position.y) / self.resolution))
+        print("[DEBUG] world2cost: [{}. {}] -> [{}, {}]".format(world_x, world_y, costmap_x, costmap_y))
+        
+        costmap_x = int( round(world_x/self.resolution) )
+        costmap_y = int( round(world_y/self.resolution) )
 
-        #costmap_x = int( round(world_x/self.resolution) )
-        #costmap_y = int( round(world_y/self.resolution) )
+        print("[DEBUG] world2cost: [{}. {}] -> [{}, {}]".format(world_x, world_y, costmap_x, costmap_y))
         return costmap_x, costmap_y
 
     # x, y are in grid_map coordinate
@@ -692,8 +691,8 @@ def main():
     client.wait_for_server()
 
     waypoints = [ 
-        [3.5, 1.6],
-        [5.0, 5.0],
+        [-15.0, 7.5],       # TEST_POINT: 2 meters away from leo initial position
+        [-12.6, 7.87],      # TEST_POINT: 5 meters away from leo initial position
         [7.22, -6.36],      # for positioning
         [7.62, -11.17],     # encounter first obstacle
         [-0.34, -16,70]     # should need to recalculate another path to reach this point
